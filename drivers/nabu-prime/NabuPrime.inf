@@ -1,0 +1,51 @@
+[Version]
+Signature   = "$WINDOWS NT$"
+Class       = System
+ClassGuid   = {4d36e97d-e325-11ce-bfc1-08002be10318}
+Provider    = %Provider%
+DriverVer   = 01/01/2026,1.0.0.0
+CatalogFile = nabuprime.cat
+PnpLockdown = 1
+
+[DestinationDirs]
+DefaultDestDir = 13
+
+[SourceDisksNames]
+1 = %DiskName%
+
+[SourceDisksFiles]
+NabuPrime.sys = 1
+
+[DefaultInstall.NTARM64]
+CopyFiles = NabuPrime_Files
+
+[DefaultInstall.NTARM64.Services]
+AddService = NabuPrime, , NabuPrime_Service
+
+[DefaultUninstall.NTARM64]
+LegacyUninstall = 1
+
+[DefaultUninstall.NTARM64.Services]
+
+DelService = NabuPrime, 0x200
+
+[NabuPrime_Files]
+NabuPrime.sys
+
+[NabuPrime_Service]
+DisplayName   = %Service.Desc%
+ServiceType   = 1
+StartType     = 2
+ErrorControl  = 1
+ServiceBinary = %13%\NabuPrime.sys
+AddReg        = NabuPrime_Parameters
+
+[NabuPrime_Parameters]
+
+HKR, Parameters, MaxLevel,      0x00010001, 20
+HKR, Parameters, LogIntervalMs, 0x00010001, 0
+
+[Strings]
+Provider     = "Nabu USB Drivers"
+DiskName     = "NabuPrime installation files"
+Service.Desc = "Nabu CPU7 frequency governor"
