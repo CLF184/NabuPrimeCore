@@ -11,10 +11,12 @@ namespace {
 constexpr ULONG kPeriodMs = 50;
 constexpr ULONG kJumpBusy = 85;
 constexpr ULONG kDownWindows = 3;
-constexpr ULONG kTopLevel = 20;
+constexpr ULONG kThermalTopLevel = 20;
 constexpr ULONG kTag = 'PNon';
 
-constexpr ULONG kExpectedKhz[kTopLevel + 1] = {
+// Preserve the original temperature/frequency limits, independently of the
+// number and spacing of OPPs provided by this unit's firmware.
+constexpr ULONG kThermalKhz[kThermalTopLevel + 1] = {
     825600,  940800,  1056000, 1171200, 1286400, 1401600, 1497600,
     1612800, 1708800, 1804800, 1920000, 2016000, 2131200, 2227200,
     2323200, 2419200, 2534400, 2649600, 2745600, 2841600, 2956800};
@@ -46,9 +48,10 @@ struct CpuTimes {
 volatile ULONG* gOsm;
 volatile ULONG* gTsens;
 ULONG gOriginal;
-ULONG gMaxLevel = kTopLevel;
+ULONG gTopLevel;
+ULONG gMaxLevel = MAXULONG;
 ULONG gLogIntervalMs;
-ULONG gLutKhz[kTopLevel + 1];
+unsigned gLutKhz[osm::kLutMaxEntries];
 ULONG gProcessors;
 CpuTimes* gTimes;
 HANDLE gThread;
@@ -65,13 +68,13 @@ LONGLONG gCapChangedMs;
 ULONG OsmRead(ULONG off) { return READ_REGISTER_ULONG(gOsm + off / 4); }
 
 void SetPrime(ULONG level) {
-  if (level > kTopLevel) level = kTopLevel;
+  if (level > gTopLevel) level = gTopLevel;
   WRITE_REGISTER_ULONG(gOsm + osm::kRegPerfState / 4, level);
 }
 
 ULONG ReadPrime() {
   ULONG level = OsmRead(osm::kRegPerfState);
-  return level <= kTopLevel ? level : kTopLevel;
+  return level <= gTopLevel ? level : gTopLevel;
 }
 
 bool ReadSensorDeciC(ULONG sensor, LONG* out) {
@@ -93,15 +96,21 @@ bool ReadSensorDeciC(ULONG sensor, LONG* out) {
   return false;
 }
 
+ULONG ThermalLevel(ULONG referenceLevel) {
+  return osm::LevelAtOrBelow(gLutKhz, gTopLevel + 1, kThermalKhz[referenceLevel]);
+}
+
 ULONG CapForDeciC(LONG t) {
-  if (t <= kCapCurve[0].deciC) return kTopLevel;
+  if (t <= kCapCurve[0].deciC) return gTopLevel;
   for (ULONG i = 1; i < RTL_NUMBER_OF(kCapCurve); ++i) {
     const CapPoint& a = kCapCurve[i - 1];
     const CapPoint& b = kCapCurve[i];
     if (t < b.deciC) {
 
       LONG span = b.deciC - a.deciC;
-      return static_cast<ULONG>((a.level * span + (b.level - a.level) * (t - a.deciC)) / span);
+      ULONG referenceLevel = static_cast<ULONG>(
+          (a.level * span + (b.level - a.level) * (t - a.deciC)) / span);
+      return ThermalLevel(referenceLevel);
     }
   }
   return 0;
@@ -124,7 +133,7 @@ ULONG UpdateThermalCap(ULONG prevCap, LONGLONG nowMs, LONG* topOut, LONG* botOut
   ULONG cap;
   if (!okTop && !okBot) {
     *avgOut = -1000;
-    cap = kCapUnknownTemp;
+    cap = ThermalLevel(kCapUnknownTemp);
   } else {
     LONG hot = (okTop && okBot) ? (top > bot ? top : bot) : (okTop ? top : bot);
     if (!gTempAvgValid) {
@@ -250,9 +259,7 @@ void ReadParameters(PUNICODE_STRING regPath) {
         }
       }
     };
-    ULONG maxLvl = kTopLevel;
-    readDword(L"MaxLevel", &maxLvl);
-    if (maxLvl <= kTopLevel) gMaxLevel = maxLvl;
+    readDword(L"MaxLevel", &gMaxLevel);
     readDword(L"LogIntervalMs", &gLogIntervalMs);
     ZwClose(params);
   }
@@ -269,6 +276,8 @@ void Runner(PVOID) {
   if (gLogIntervalMs > 0 && NT_SUCCESS(log.Open())) {
     log.Line("NabuPrime qpc_freq %lld start_qpc %lld original_level %u max_level %u period_ms %u",
              qpcFreq.QuadPart, startQpc, gOriginal, gMaxLevel, kPeriodMs);
+    log.Line("LUT levels %u min_khz %u max_khz %u",
+             gTopLevel + 1, gLutKhz[0], gLutKhz[gTopLevel]);
   }
 
   ZwQuerySystemInformation(kSystemProcessorPerformanceInformation, gTimes,
@@ -394,27 +403,21 @@ void Unload(PDRIVER_OBJECT) {
   Cleanup();
 }
 
+// Retain an address relocation for loading the native image at a kernel VA.
+PDRIVER_UNLOAD volatile gUnloadRoutine = Unload;
+
 bool ValidateAndLoadLut() {
-  if (!(OsmRead(osm::kRegEnable) & 1u)) return false;
-  ULONG prev = 0;
-  for (ULONG i = 0; i <= kTopLevel + 1; ++i) {
-    osm::LutRow r = osm::DecodeLut(OsmRead(osm::kRegFreqLut + i * osm::kLutRowSize),
-                                   OsmRead(osm::kRegVoltLut + i * osm::kLutRowSize));
-    if (i <= kTopLevel) {
-      if (r.khz != kExpectedKhz[i]) return false;
-      gLutKhz[i] = r.khz;
-    } else if (r.khz != prev) {
-      return false;
-    }
-    prev = r.khz;
-  }
+  unsigned count = osm::LoadFrequencyTable(OsmRead, gLutKhz);
+  if (count == 0) return false;
+  gTopLevel = count - 1;
+  if (gMaxLevel > gTopLevel) gMaxLevel = gTopLevel;
   return true;
 }
 
 }
 
 extern "C" NTSTATUS DriverEntry(PDRIVER_OBJECT driver, PUNICODE_STRING regPath) {
-  driver->DriverUnload = Unload;
+  driver->DriverUnload = gUnloadRoutine;
   KeInitializeEvent(&gWake, NotificationEvent, FALSE);
   ReadParameters(regPath);
 
@@ -428,7 +431,7 @@ extern "C" NTSTATUS DriverEntry(PDRIVER_OBJECT driver, PUNICODE_STRING regPath) 
   if (!gOsm) return STATUS_INSUFFICIENT_RESOURCES;
 
   gOriginal = OsmRead(osm::kRegPerfState);
-  if (!ValidateAndLoadLut() || gOriginal > kTopLevel) {
+  if (!ValidateAndLoadLut() || gOriginal > gTopLevel) {
     Cleanup();
     return STATUS_DEVICE_CONFIGURATION_ERROR;
   }

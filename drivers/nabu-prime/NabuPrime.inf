@@ -3,7 +3,7 @@ Signature   = "$WINDOWS NT$"
 Class       = System
 ClassGuid   = {4d36e97d-e325-11ce-bfc1-08002be10318}
 Provider    = %Provider%
-DriverVer   = 01/01/2026,1.0.0.0
+DriverVer   = 10/30/2026,1.0.3.0
 CatalogFile = nabuprime.cat
 PnpLockdown = 1
 
@@ -42,7 +42,7 @@ AddReg        = NabuPrime_Parameters
 
 [NabuPrime_Parameters]
 
-HKR, Parameters, MaxLevel,      0x00010001, 20
+HKR, Parameters, MaxLevel,      0x00010001, 0xffffffff
 HKR, Parameters, LogIntervalMs, 0x00010001, 0
 
 [Strings]
